@@ -1,0 +1,226 @@
+---
+title: "dataset"
+author: "Xintong"
+date: "2022/2/18"
+output: 
+  pdf_document:
+          latex_engine: xelatex # pdflatex
+          number_sections: yes
+fig_caption: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+```
+
+```{r}
+#loading packages
+library(tidyverse)
+library(ggplot2)
+library(dplyr)
+library(moderndive)
+library(skimr)
+library(kableExtra)
+library(GGally)
+library(sampling)
+library(tidyr)
+library(ggfortify) 
+library(gridExtra)
+library(data.table)
+library(olsrr)
+```
+# questions
+1: What is the relationship between the mobile cellular subscriptions and the Individuals using the Internet ? (linear model) 
+2: What is the relationship between Individuals using the Internet and GDP-Per-Capital?
+3: Predict the future tendency of the Individuals using the Internet. (perform not good in prediction) 
+
+# data cleansing
+```{r}
+#loading data set
+mobile.subscription <- read.csv("Group_05_Data_1.csv")# https://ourworldindata.org/technology-adoption#internet-access-technology 
+population.internet <- read.csv("Group_05_Data_2.csv")#https://ourworldindata.org/technology-adoption#mobile-phone-adoption 
+transistors <- read.csv("Group_05_Data_3.csv")#https://ourworldindata.org/grapher/transistors-per-microprocessor 
+gdp <- read.csv("Group_05_Data_4.csv")#https://ourworldindata.org/grapher/mobile-phone-subscriptions-vs-gdp-per-capita 
+```
+
+```{r}
+#choose data with gdp bigger than 0 and years after 2000
+gdp <- gdp %>% 
+  rename(gdp = GDP.per.capita..PPP..constant.2017.international...)%>% 
+  filter(Year >=2000, gdp > 0)%>%
+  dplyr::select(Entity, Year, gdp)
+```
+
+## fill the NAN in transistors (not every year has the data)
+```{r}
+#add years from population.internet to transistor.
+year <- data.frame("Year" = 2000:max(population.internet$Year))
+transistors <- year %>%
+  left_join(transistors[,c(-1,-2)], by = c("Year"))
+```
+algorithm:
+use the Regression model (Year vs Transistors.per.microprocessor) to fill the NAN
+```{r}
+## fit the regression model
+ggplot(transistors, mapping = aes(x = Year, y = Transistors.per.microprocessor))+
+  geom_point()
+transistors.model <- lm(log(Transistors.per.microprocessor) ~ Year, data = transistors)
+summary(transistors.model)
+## predict the data
+pre.lg.transistors <- predict(transistors.model,newdata = year,interval="confidence")[,1]
+pre.transistors <- exp(pre.lg.transistors);pre.transistors
+## fill the NAN
+for (i in 1: length(pre.transistors)) {
+  if(is.na(transistors$Transistors.per.microprocessor[i])){
+    transistors$Transistors.per.microprocessor[i] = pre.transistors[i]
+  }
+}
+```
+
+# combine of data
+```{r,  fig.pos="h"}
+#Take out the data we care about and put it together
+data1 <- population.internet[,-2] %>%
+  inner_join(mobile.subscription[,-2], by = c("Entity", "Year"))%>%
+  left_join(transistors, by = c("Year"))%>%
+  left_join(gdp, by=c("Entity", "Year"))
+#Simplify column names
+data1 <- data1%>%
+  rename(population.Internet = Individuals.using.the.Internet....of.population.,
+         mobile.subscription = Mobile.cellular.subscriptions..per.100.people.,
+         transistors = Transistors.per.microprocessor)
+# data1 %>%
+#   head(n=10)%>%
+#   kable(caption = "data1")%>%
+#   kable_styling(font_size = 10, latex_options = "hold_position")
+```
+
+## plan A1(464 obs)(best one)
+choose the observation that the Internet population is larger than 0 and less than e after 2007.We need a subset with less than 500 data and obvious trend.
+```{r}
+#Internet population larger than 0 and less than e
+data1.1 <- data1%>%
+  filter(Year == 2007,population.Internet >0,population.Internet <exp(1))
+entity <- unique(data1.1$Entity)
+#after 2007
+data1.2 <- data1 %>%
+  filter(Entity %in% entity, Year >= 2007)
+```
+
+## plan A2(500 obs)(perform not good)
+based on the 2010 year obs, choose the country within 10%-90% Internet population,  random choose 50 country.(sampling without replacement)
+```{r}
+# p.max <- max(data1$population.Internet);p.min <- min(data1$population.Internet);
+# entity <- data1%>%
+#   filter(Year == 2010,
+#          population.Internet >0.1*(p.max-p.min),
+#          population.Internet <0.9*(p.max-p.min))%>%
+#   select(Entity)%>%
+#   unique()
+# choose.entity <- sample(entity$Entity, 50)
+# data1.2 <- data1%>%
+#   filter(Entity %in% choose.entity, Year >= 2010)
+```
+
+# scatterplot and correlation
+```{r, echo=TRUE}
+ggpairs(data1.2[,3:6]) 
+pairs(data1.2[,3:6])
+```
+
+# linear regression
+```{r}
+#Take logarithm of data
+data1.2 <- data1.2 %>%
+  mutate(lg.population.Internet = log(population.Internet),
+         lg.mobile.subscription = log(mobile.subscription),
+         qua.lg.mobile.subscription = (log(mobile.subscription))^2,
+         lg.transistors = log(transistors),
+         lg.gdp = log(gdp))
+```
+linear model(without log)
+```{r}
+data1.model <- lm(population.Internet ~ mobile.subscription + transistors + gdp, data = data1.2)
+summary(data1.model)$r.squared
+summary(data1.model)$adj.r.squared
+```
+## stepwise(mobile.subscription, transistors, gdp are suggested to be added into model)
+```{r}
+#Use functions to find variables that should be added to the model
+model.selection <- ols_step_best_subset(data1.model)
+#Display model
+data.table(Model = model.selection$predictors,
+AIC = model.selection$aic, BIC = model.selection$sbc,
+R2 = model.selection$rsquare, R2adj = model.selection$adjr)
+summary(data1.model)
+```
+
+log linear model(**the best one**)
+```{r}
+data1.model1 <- lm(lg.population.Internet ~ lg.mobile.subscription + lg.transistors + lg.gdp, data = data1.2)
+summary(data1.model1)$r.squared
+summary(data1.model1)$adj.r.squared
+summary(data1.model1)
+```
+```{r, echo=FALSE}
+model1.coef <- data1.model1$coefficients
+```
+the final model is:
+$$log(population.Internet) = \beta_0 + \beta_1*log(mobile.subscription)+\beta_2*log(transistors)+\beta_3*log(gdp) $$
+the coefficients of the model is $\beta_0$=`r round(model1.coef[[1]],2)`,$\beta_1$=`r round(model1.coef[[2]],2)`,$\beta_2$=`r round(model1.coef[[3]],2)`,$\beta_3$=`r round(model1.coef[[4]],2)`
+
+quadratic model(not good)
+```{r}
+# data1.model2 <- lm(lg.population.Internet ~  qua.lg.mobile.subscription + lg.transistors, data = data1.2)
+# summary(data1.model2)$r.squared
+# summary(data1.model2)$adj.r.squared
+```
+
+# residual
+```{r}
+#Draw residual diagram
+regression_points <- get_regression_points(data1.model1)
+ggplot(regression_points, aes(x = lg.population.Internet, y = residual)) +
+  geom_jitter(width = 0.1) + 
+  labs(x = "lg.population.Internet", y = "Residual") +
+  geom_hline(yintercept = 0, col = "blue")
+```
+
+```{r}
+#Plot and analyze the mean value and the similarity with the normal distribution
+autoplot(data1.model1, which=1:2)
+```
+
+#predict(still not in the confidence interval)
+```{r}
+#Remove meaningless lines 
+data1[data1==0]<-NA
+data1.t<-na.omit(data1)
+#Twenty data are randomly selected from the original data to test whether the model can have good prediction effect
+test<-data1.t[sample(nrow(data1.t),20),3:6]
+test <- test %>%
+  mutate(lg.population.Internet = log(population.Internet),
+         lg.mobile.subscription = log(mobile.subscription),
+         lg.transistors = log(transistors),
+         lg.gdp = log(gdp))
+test.pre<-predict(data1.model1,newdata = test[,6:8],interval="confidence",level = 0.99)
+test.compare<-cbind(test.pre,test$lg.population.Internet)
+#In fact, the real value is generally outside the confidence interval of prediction
+#Confidence interval of each parameter
+confint.default(data1.model1)
+#Number of true values in the confidence interval of prediction
+s<-0
+for (i in 1:20) {
+  if(!is.na(test.compare[i,1])){if(test.compare[i,4]>test.compare[i,2]&&test.compare[i,4]<test.compare[i,3]) {s=s+1}
+  }
+}
+```
+
+# the relationship between Individuals using the Internet and gdp (scatterplot)
+```{r}
+#Scatter plot of GDP and the proportion of Internet population
+ggplot(data1.2, aes(x = gdp, y = population.Internet)) +
+  geom_jitter(width = 0.1) + 
+  labs(x = "gdp", y = "population.Internet")
+```
+
